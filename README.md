@@ -4,7 +4,7 @@ PiSugar 3 support for [Bjorn](https://github.com/infinition/Bjorn): battery leve
 e-ink display, automatic shutdown on low battery, and the board cutting its own power
 when the Pi halts — all switchable from Bjorn's own web UI.
 
-![Battery indicator in the Bjorn header at 95%, 63% charging, and 8%](docs/header.png)
+![Bjorn on a Pi Zero 2 W: the battery indicator in the header, on battery and while charging](docs/device.jpg)
 
 Bjorn knows nothing about batteries and has no plugin system, so this is a small add-on:
 one module dropped next to `Bjorn.py`, five lines patched into `display.py`, and two
@@ -18,6 +18,8 @@ glyph fills proportionally, and when external power is connected it goes solid w
 lightning bolt knocked out of it. The `BJORN` logo shifts from `x=37` to `x=23` to make
 room; the network icons move to `x=76` and share a slot, since 122 pixels do not fit both
 at once.
+
+![The header at 95%, 63% charging and 8%](docs/header.png)
 
 **Low-battery shutdown.** A systemd timer checks every two minutes and calls
 `systemctl poweroff` when the battery is at or below your threshold and unplugged. It

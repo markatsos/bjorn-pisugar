@@ -7,17 +7,18 @@ when the Pi halts — all switchable from Bjorn's own web UI.
 ![Bjorn on a Pi Zero 2 W: the battery indicator in the header, on battery and while charging](docs/device.jpg)
 
 Bjorn knows nothing about batteries and has no plugin system, so this is a small add-on:
-one module dropped next to `Bjorn.py`, five lines patched into `display.py`, and two
-systemd units. Nothing is forked and nothing is vendored — an uninstall puts everything
-back byte-for-byte.
+one module dropped next to `Bjorn.py`, a handful of lines patched into `display.py`, and
+two systemd units. Nothing is forked and nothing is vendored — an uninstall puts
+everything back byte-for-byte.
 
 ## What it adds
 
 **Battery indicator.** Percentage and a battery glyph in the top right of the header. The
 glyph fills proportionally, and when external power is connected it goes solid with a
-lightning bolt knocked out of it. The `BJORN` logo shifts from `x=37` to `x=23` to make
-room; the network icons move to `x=76` and share a slot, since 122 pixels do not fit both
-at once.
+lightning bolt knocked out of it. It anchors to the right edge of whatever panel is
+fitted. On a narrow 2.13" header there is no free space, so the installer also shifts the
+`BJORN` logo from `x=37` to `x=23` and puts the two network icons in one shared slot —
+122 pixels will not hold both. Wider panels keep the stock layout.
 
 ![The header at 95%, 63% charging and 8%](docs/header.png)
 
@@ -29,8 +30,10 @@ rather than a thread inside Bjorn: if `bjorn.service` dies, the protection has t
 
 **Power cut on halt.** `poweroff` stops the Pi but the PiSugar keeps feeding 5V into
 nothing until the battery is flat. A unit hooked to `poweroff.target` tells the board to
-drop the rail after a countdown. It is wired to `poweroff.target` and `halt.target` but
-deliberately **not** `reboot.target`, so a reboot does not kill the board.
+switch itself off — a timed countdown on a PiSugar 3, light-load auto shutdown on the
+older chips, which comes to the same thing. It is wired to `poweroff.target` and
+`halt.target` but deliberately **not** `reboot.target`, so a reboot does not kill the
+board.
 
 **Manual shutdown** already exists in stock Bjorn — Playground, the gear dropdown,
 *Shutdown*. It runs `shutdown now`, which goes through `poweroff.target`, so with this

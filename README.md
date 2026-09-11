@@ -1,6 +1,6 @@
 # bjorn-pisugar
 
-PiSugar 3 support for [Bjorn](https://github.com/infinition/Bjorn): battery level on the
+PiSugar support for [Bjorn](https://github.com/infinition/Bjorn): battery level on the
 e-ink display, automatic shutdown on low battery, and the board cutting its own power
 when the Pi halts — all switchable from Bjorn's own web UI.
 

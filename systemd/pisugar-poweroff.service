@@ -1,0 +1,13 @@
+[Unit]
+Description=Cut PiSugar power after the Pi halts
+Documentation=https://github.com/PiSugar/PiSugar/wiki/PiSugar-3-I2C-Datasheet
+DefaultDependencies=no
+Before=poweroff.target halt.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @BJORN_DIR@/pisugar.py --cut-power
+TimeoutStartSec=20
+
+[Install]
+WantedBy=poweroff.target halt.target

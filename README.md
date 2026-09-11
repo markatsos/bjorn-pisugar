@@ -41,6 +41,8 @@ add-on installed the PiSugar switches off too. Nothing to add.
 Bjorn builds its config page straight from `shared_config.json` — booleans become
 switches, numbers become fields — so these appear under **Config** with no HTML changes:
 
+![The PiSugar switches and fields on Bjorn's Config page](docs/config.png)
+
 | Key | Default | What it does |
 |---|---|---|
 | `pisugar_show_battery` | `true` | Draw the indicator in the header |

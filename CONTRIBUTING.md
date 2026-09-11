@@ -14,8 +14,9 @@ uname -m
 systemctl status pisugar-guard.timer --no-pager
 ```
 
-`uname -m` matters: everything here is verified on `aarch64` only. Reports from `armv7l`
-are useful either way — working or not.
+Say which PiSugar and which panel you have. [COMPATIBILITY.md](COMPATIBILITY.md) lists
+what is confirmed; most rows are still unticked and a single report is enough to change
+one.
 
 ## The display patch
 

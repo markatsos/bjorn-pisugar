@@ -50,34 +50,56 @@ switches, numbers become fields — so these appear under **Config** with no HTM
 | `pisugar_shutdown_percent` | `10` | Shut down at or below this level |
 | `pisugar_cut_power` | `true` | Let the board cut its own power on halt |
 | `pisugar_cut_power_delay` | `30` | Countdown before the rail drops |
+| `pisugar_model` | `auto` | Override board detection: `3`, `ip5209`, `ip5312` |
 
 Bjorn does not autosave — press the **Save** button in the toolbar (the gold SAVE icon,
 second from the left on the second row) or the change is lost on the next page load.
 After saving, changes take effect on the next timer tick, with no restart needed for the
 guard; the indicator picks up `pisugar_show_battery` on the next screen refresh.
 
-## Tested on
+## Supported hardware
 
-This is verified on exactly one configuration. It is not a claim that it works elsewhere.
+The board is found by probing I2C — `i2c-1` first, then `i2c-0` for very old Pi revisions —
+and identified by which address answers and what the registers read back. **The PiSugar
+has to be switched on for any of this to work**: if you power the Pi from *its own* USB
+port, the PiSugar controller stays off, nothing answers on the bus, and the indicator
+simply stays hidden. Press the button on the board.
 
-| | |
+| Board | Detected at | How the level is obtained |
+|---|---|---|
+| PiSugar 3 / 3 Plus | `0x57` | percentage straight from the chip |
+| PiSugar 1 / 2 | `0x75`, IP5209 | voltage, converted with a ten-point curve |
+| PiSugar 2 Pro / Plus | `0x75`, IP5312 | voltage, converted with a ten-point curve |
+
+| Panel | Header |
 |---|---|
-| Board | Raspberry Pi Zero 2 W |
-| Battery | PiSugar 3, 1200 mAh |
-| Display | Waveshare 2.13" e-Paper HAT **V4** (`epd2in13_V4`) |
-| OS | Raspberry Pi OS Bookworm **arm64** Lite, image `2024-10-22` |
-| Bjorn | `v1.0.0 alpha 2`, upstream `main` at commit [`61a4758`](https://github.com/infinition/Bjorn/commit/61a4758e5ee3d37d43c10eb690340626139912c0) (4 May 2026) |
+| Waveshare 2.13" V1-V4 (122×250) | logo shifted left, network icons share a slot |
+| Waveshare 2.7" (176×264) | stock layout, there is room to spare |
 
-Known limits of that scope:
+The indicator itself is anchored to the right edge of whatever panel is fitted, so it
+lands correctly on either size without being told which one it is. If detection ever picks
+wrong, `pisugar_model` in the config overrides it — `3`, `ip5209` or `ip5312`.
 
-- **armhf (32-bit) is untested.** Bjorn supports it and nothing here is obviously
-  architecture-dependent, but nobody has run it.
-- **Only the 2.13" V4 layout is tested.** The header coordinates are tuned for a
-  122×250 panel. On `epd2in7` the indicator will land in the wrong place.
-- **PiSugar 2 will not work.** The register map is different.
-- The `display.py` patch matches four exact snippets of upstream. If Bjorn changes those
-  lines, the installer refuses rather than producing a half-patched file. That is by
-  design — open an issue with your Bjorn version.
+> ### Tested on exactly one machine
+>
+> Raspberry Pi Zero 2 W · PiSugar 3 · Waveshare 2.13" **V4** · Raspberry Pi OS Bookworm
+> **arm64** Lite (`2024-10-22`) · Bjorn `v1.0.0 alpha 2` (upstream `main` at
+> [`61a4758`](https://github.com/infinition/Bjorn/commit/61a4758e5ee3d37d43c10eb690340626139912c0)).
+>
+> Everything else in the tables above is written from the PiSugar datasheets and the
+> official power manager's source, and has **never been run on real hardware**. It should
+> work. Nobody has proved it.
+>
+> **[COMPATIBILITY.md](COMPATIBILITY.md)** tracks what is confirmed and what is not. If you
+> have a different PiSugar or a different panel, please
+> [open an issue](https://github.com/markatsos/bjorn-pisugar/issues) — working or broken,
+> both are worth knowing, and the tables get updated from those reports.
+
+Two things behave differently on the older boards. The level is derived from voltage
+rather than reported by a controller, so expect it to be less steady under load. And they
+have no timed power cut — instead the installer arms *light-load auto shutdown*, which
+switches the board off about eight seconds after the current draw collapses, which is what
+happens when the Pi halts. On those boards `pisugar_cut_power_delay` is ignored.
 
 ## Install
 
@@ -98,15 +120,8 @@ It installs `python3-smbus2` and `i2c-tools`, enables I2C if needed, copies the 
 patches `display.py` (keeping the original as `display.py.stock`), adds the config keys,
 and enables the two units.
 
-### Before you start
-
-The PiSugar has to be switched on. The classic trap: if you power the Pi from *its own*
-USB port, the PiSugar controller stays off and there is no I2C at all. Press the button
-on the board. Check with:
-
-```bash
-i2cdetect -y 1     # want 57 in the table
-```
+The installer prints what it found — architecture, panel, and which PiSugar answered —
+before it changes anything, and warns loudly if it detects a board on the untested path.
 
 ## CLI
 
@@ -124,8 +139,10 @@ battery to drain. Unplug first, or it will correctly refuse to act.
 
 ## How it works
 
-Everything goes over I2C at address `0x57`. No daemon, no `pisugar-power-manager`,
-two byte reads every 30 seconds.
+Everything goes over I2C. No daemon, no `pisugar-power-manager`, two byte reads every
+30 seconds.
+
+**PiSugar 3**, at `0x57`:
 
 | Register | Use |
 |---|---|
@@ -139,14 +156,28 @@ Two things the datasheet is easy to miss on: the registers are write-protected u
 unlock `0x0B`, and `0x09` has to be written **before** `0x02` is touched or the board
 ignores the delay completely.
 
+**PiSugar 1 / 2**, at `0x75` (IP5209): voltage from `0xa2`/`0xa3`, external power from
+`0x55` bit 4, light-load auto shutdown armed through `0x0c`, `0x04` and `0x02`.
+
+**PiSugar 2 Pro / Plus**, at `0x75` (IP5312): voltage from `0xd0`/`0xd1`, external power
+when `0xdd` reads `0x1f`, light-load auto shutdown through `0xc9`, `0x06` and `0x03`.
+
+The two `0x75` chips are told apart by reading the IP5312 voltage registers first: on an
+IP5209 they read back as zero, which fails the check, so it falls through to the IP5209
+path.
+
 Note that bit 7 means "there is power at the USB port", not "the battery is filling". At
 100% with the cable in, the bolt stays lit. That is usually the thing you actually want
 to know.
 
 ## Troubleshooting
 
-**Nothing in the header.** Is the PiSugar switched on? `i2cdetect -y 1` should show `57`.
-Then check `pisugar_show_battery` in Config.
+**Nothing in the header.** Is the PiSugar switched on? `i2cdetect -y 1` should show `57`
+for a PiSugar 3 or `75` for a 1/2. Then check `pisugar_show_battery` in Config.
+
+**Wrong board detected.** `pisugar.py --status` prints which backend it picked. If it is
+wrong, set `pisugar_model` in Config to `3`, `ip5209` or `ip5312` and it will stop
+guessing.
 
 **The guard never fires.** It refuses while external power is present, by design. Unplug
 and test with `--guard 100`.

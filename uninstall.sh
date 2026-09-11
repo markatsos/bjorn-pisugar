@@ -53,7 +53,8 @@ try:
 except Exception as e:
     sys.exit(f"could not read config: {e}")
 keys = ["__title_pisugar__", "pisugar_show_battery", "pisugar_autoshutdown",
-        "pisugar_shutdown_percent", "pisugar_cut_power", "pisugar_cut_power_delay"]
+        "pisugar_shutdown_percent", "pisugar_cut_power", "pisugar_cut_power_delay",
+        "pisugar_model"]
 removed = [k for k in keys if config.pop(k, None) is not None]
 if removed:
     json.dump(config, io.open(path, "w", encoding="utf-8"), indent=4)

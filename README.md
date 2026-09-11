@@ -51,8 +51,10 @@ switches, numbers become fields — so these appear under **Config** with no HTM
 | `pisugar_cut_power` | `true` | Let the board cut its own power on halt |
 | `pisugar_cut_power_delay` | `30` | Countdown before the rail drops |
 
-Changes take effect on the next timer tick — no restart needed for the guard. The
-indicator picks up `pisugar_show_battery` on the next screen refresh.
+Bjorn does not autosave — press the **Save** button in the toolbar (the gold SAVE icon,
+second from the left on the second row) or the change is lost on the next page load.
+After saving, changes take effect on the next timer tick, with no restart needed for the
+guard; the indicator picks up `pisugar_show_battery` on the next screen refresh.
 
 ## Tested on
 
@@ -148,6 +150,14 @@ Then check `pisugar_show_battery` in Config.
 
 **The guard never fires.** It refuses while external power is present, by design. Unplug
 and test with `--guard 100`.
+
+**A setting will not stick.** `--status` prints what is actually in `shared_config.json`,
+so if it still shows the old value the file never changed — almost always a missed
+**Save** in the toolbar. Verify with:
+
+```bash
+grep pisugar_shutdown_percent /home/bjorn/Bjorn/config/shared_config.json
+```
 
 **The Pi shuts down shortly after a reboot.** The poweroff unit fired when it should not
 have. Check `systemctl cat pisugar-poweroff.service` — `WantedBy` must not list

@@ -71,11 +71,14 @@ that wired the header differently.
 | Version | Status |
 |---|---|
 | `v1.0.0 alpha 2` — upstream `main` at [`61a4758`](https://github.com/infinition/Bjorn/commit/61a4758e5ee3d37d43c10eb690340626139912c0), 4 May 2026 | ✅ verified |
+| Bjorn V2 — unreleased, upstream `dev` / `ai` branches | ❌ not supported yet — `display.py` was rewritten |
 
 `install.sh` patches `display.py` by matching exact snippets of upstream source. If Bjorn
-changes those lines, the installer stops and changes nothing rather than producing a
-half-patched file. If that happens to you, open an issue with the output of
-`cat /home/bjorn/Bjorn/version.txt` and we will add the new snippets.
+changes those lines, the installer stops before touching `display.py` rather than producing
+a half-patched file. By that point it has already installed its packages and copied
+`pisugar.py`, so run `sudo ./uninstall.sh` to remove the copied files. If that happens to
+you, open an issue with the output of `cat /home/bjorn/Bjorn/version.txt` and we will add
+the new snippets.
 
 ## Reporting a result
 

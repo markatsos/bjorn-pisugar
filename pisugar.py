@@ -9,15 +9,18 @@ Three jobs, one module:
 Settings live in Bjorn's own config/shared_config.json, so they render as
 switches and fields on the web UI's Config page without touching any HTML.
 
-Supported boards, picked automatically:
+Boards:
 
-  PiSugar 3 / 3 Plus   0x57   percentage straight from the chip, timed power cut
-  PiSugar 1 / 2        0x75   IP5209 - voltage only, level from a curve
-  PiSugar 2 Pro/Plus   0x75   IP5312 - same idea, different registers
+  PiSugar 3 / 3 Plus      0x57   level and charge state from the controller,
+                                 low-battery shutdown, timed power cut
+  PiSugar 2 (2 or 4 LEDs) 0x75   IP5209 - battery level from voltage, read-only
+  PiSugar 2 Pro / 2 Plus  0x75   IP5312 - battery level from voltage, read-only
 
-Only the PiSugar 3 path is verified on hardware. The IP5209 and IP5312 paths are
-written from the PiSugar datasheets and the official power manager's source; they
-have never been run on a real board. See the README.
+Only the PiSugar 3 path is verified on hardware. The PiSugar 2 boards are
+experimental and are never written to: their charge-state detection differs
+between variants and needs register set-up first, so they get the battery level
+and nothing that acts on the hardware. PiSugar 1 has no I2C (IP5306) and cannot
+be supported. See COMPATIBILITY.md.
 """
 
 import contextlib
@@ -125,12 +128,17 @@ def _interpolate(voltage, curve):
 # Backends                                                                     #
 # --------------------------------------------------------------------------- #
 
+class NotSupported(Exception):
+    """The board cannot do this, by design rather than by failure."""
+
+
 class Backend:
     """One battery board. Subclasses know their own registers."""
 
     name = "unknown"
     addr = 0x00
-    tested = False
+    tested = False      # run on real hardware
+    writable = False    # power control: register writes and the low-battery shutdown
 
     def __init__(self, bus_id):
         self.bus_id = bus_id
@@ -140,15 +148,15 @@ class Backend:
         raise NotImplementedError
 
     def read(self, bus):
-        """Return (percent 0-100, external power present)."""
+        """Return (percent 0-100, external power present - or None if not read)."""
         raise NotImplementedError
 
     def cut_power(self, bus, delay):
         """Arrange for the rail to drop once the Pi is down. Returns a description."""
-        raise NotImplementedError
+        raise NotSupported(f"{self.name}: no power control on this board")
 
     def cancel_cut_power(self, bus):
-        raise NotImplementedError
+        raise NotSupported(f"{self.name}: no power control on this board")
 
 
 class PiSugar3(Backend):
@@ -164,6 +172,7 @@ class PiSugar3(Backend):
     name = "PiSugar 3"
     addr = 0x57
     tested = True
+    writable = True
 
     REG_CTRL1 = 0x02
     REG_DELAY = 0x09
@@ -226,20 +235,23 @@ class PiSugar3(Backend):
 
 
 class IP5209(Backend):
-    """PiSugar 1 and PiSugar 2 (the IP5209 chip). UNTESTED.
+    """PiSugar 2, 2-LED and 4-LED (the IP5209 chip). UNTESTED, read-only.
 
     0xa2/0xa3   battery voltage, low byte then high 6 bits with a sign bit
-    0x55 bit 4  external power connected
-    0x0c/0x04/0x02  light-load auto shutdown: threshold, timing, enable
+
+    Only the voltage is read. The two variants detect external power in different
+    ways - the 2-LED board on 0x55 bit 4 once its GPIOs have been configured, the
+    4-LED board not through a register at all - and configuring the GPIOs means
+    writing to the chip. Until this runs on real hardware it stays read-only: a
+    battery level, but no charge state, no low-battery shutdown and no power cut.
     """
 
-    name = "PiSugar 1/2 (IP5209)"
+    name = "PiSugar 2 (IP5209)"
     addr = 0x75
     tested = False
 
     CURVE = [(4.16, 100.0), (4.05, 95.0), (4.00, 80.0), (3.92, 65.0), (3.86, 40.0),
              (3.79, 25.5), (3.66, 10.0), (3.52, 6.5), (3.49, 3.2), (3.10, 0.0)]
-    IDLE_INTENSITY_A = 0.11          # Pi Zero idle draw the official manager assumes
 
     def voltage(self, bus):
         low = bus.read_byte_data(self.addr, 0xA2)
@@ -260,46 +272,24 @@ class IP5209(Backend):
 
     def read(self, bus):
         percent = int(round(_interpolate(self.voltage(bus), self.CURVE)))
-        plugged = bool(bus.read_byte_data(self.addr, 0x55) & 0b0001_0000)
-        return max(0, min(100, percent)), plugged
-
-    def cut_power(self, bus, delay):
-        # No timed cutoff on this chip. Instead arm light-load auto shutdown: once
-        # the Pi halts, the draw drops below the threshold and the board powers
-        # off by itself about eight seconds later. `delay` is not used.
-        threshold = int(self.IDLE_INTENSITY_A * 1000.0 / 12.0)
-        threshold = min(threshold, 0b0001_1111)
-        v = bus.read_byte_data(self.addr, 0x0C) & 0b0000_0111
-        bus.write_byte_data(self.addr, 0x0C, v | (threshold << 3))
-
-        v = bus.read_byte_data(self.addr, 0x04) & 0b0011_1111   # 8 s
-        bus.write_byte_data(self.addr, 0x04, v)
-
-        v = bus.read_byte_data(self.addr, 0x02)
-        bus.write_byte_data(self.addr, 0x02, v | 0b0000_0011)
-        return "light-load auto shutdown armed, board powers off ~8s after the Pi halts"
-
-    def cancel_cut_power(self, bus):
-        v = bus.read_byte_data(self.addr, 0x02)
-        bus.write_byte_data(self.addr, 0x02, v & 0b1111_1101)
-        return "light-load auto shutdown disabled"
+        return max(0, min(100, percent)), None
 
 
 class IP5312(IP5209):
-    """PiSugar 2 Pro and 2 Plus (the IP5312 chip). UNTESTED.
+    """PiSugar 2 Pro, now sold as PiSugar 2 Plus (the IP5312 chip). UNTESTED, read-only.
 
     0xd0/0xd1   battery voltage, low byte then high 6 bits
-    0xdd        0x1f when external power is connected
-    0xc9/0x06/0x03  light-load auto shutdown: threshold, timing, enable
+
+    As with the IP5209, reading the charge state needs GPIO set-up writes first,
+    so only the voltage is read.
     """
 
-    name = "PiSugar 2 Pro/Plus (IP5312)"
+    name = "PiSugar 2 Pro / 2 Plus (IP5312)"
     addr = 0x75
     tested = False
 
     CURVE = [(4.10, 100.0), (4.05, 95.0), (3.90, 88.0), (3.80, 77.0), (3.70, 65.0),
              (3.62, 55.0), (3.58, 49.0), (3.49, 25.6), (3.32, 4.5), (3.10, 0.0)]
-    IDLE_INTENSITY_A = 0.20
 
     def voltage(self, bus):
         low = bus.read_byte_data(self.addr, 0xD0)
@@ -308,43 +298,23 @@ class IP5312(IP5209):
             raise OSError("IP5312 voltage registers read zero")
         return (((high & 0b0011_1111) << 8) + low) * 0.26855 / 1000.0 + 2.6
 
-    def read(self, bus):
-        percent = int(round(_interpolate(self.voltage(bus), self.CURVE)))
-        plugged = bus.read_byte_data(self.addr, 0xDD) == 0x1F
-        return max(0, min(100, percent)), plugged
-
-    def cut_power(self, bus, delay):
-        threshold = int(self.IDLE_INTENSITY_A * 1000.0 / 4.3)
-        threshold = min(threshold, 0b0011_1111)
-        v = bus.read_byte_data(self.addr, 0xC9) & 0b1100_0000
-        bus.write_byte_data(self.addr, 0xC9, v | threshold)
-
-        v = bus.read_byte_data(self.addr, 0x06) & 0b0011_1111   # 8 s
-        bus.write_byte_data(self.addr, 0x06, v)
-
-        v = bus.read_byte_data(self.addr, 0x03)
-        bus.write_byte_data(self.addr, 0x03, v | 0b0010_0000)
-        return "light-load auto shutdown armed, board powers off ~8s after the Pi halts"
-
-    def cancel_cut_power(self, bus):
-        v = bus.read_byte_data(self.addr, 0x03)
-        bus.write_byte_data(self.addr, 0x03, v & 0b1101_1111)
-        return "light-load auto shutdown disabled"
-
 
 # IP5312 is tried before IP5209: they share address 0x75, and the 5312 registers
 # read back as zero on a 5209, which its probe rejects.
 BACKENDS = (PiSugar3, IP5312, IP5209)
 BY_NAME = {"3": PiSugar3, "pisugar3": PiSugar3,
            "ip5312": IP5312, "2pro": IP5312, "2plus": IP5312,
-           "ip5209": IP5209, "2": IP5209, "1": IP5209}
+           "ip5209": IP5209, "2": IP5209}
+UNSUPPORTED = {"1": "PiSugar 1 has no I2C (IP5306) and cannot be read"}
 
 
 def detect(model="auto"):
     """Find the board. Returns a Backend instance, or None if nothing answers."""
     SMBus = _smbus()
     wanted = None if model in ("", "auto") else BY_NAME.get(model)
-    if model not in ("", "auto") and wanted is None:
+    if model in UNSUPPORTED:
+        logger.warning("pisugar_model %r: %s - falling back to auto", model, UNSUPPORTED[model])
+    elif model not in ("", "auto") and wanted is None:
         logger.warning("Unknown pisugar_model %r - falling back to auto", model)
 
     for bus_id in CANDIDATE_BUSES:
@@ -487,6 +457,9 @@ def cut_power(delay=None, respect_config=True):
     backend, settings = _with_board()
     if backend is None:
         return 1
+    if not backend.writable:
+        logger.info("%s is read-only here - no power cut", backend.name)
+        return 0
     if respect_config and not settings["pisugar_cut_power"]:
         logger.info("pisugar_cut_power is off - leaving the rail alone")
         return 0
@@ -501,6 +474,9 @@ def cancel_cut_power():
     backend, _ = _with_board()
     if backend is None:
         return 1
+    if not backend.writable:
+        logger.info("%s is read-only here - there is no countdown to cancel", backend.name)
+        return 0
     with _smbus()(backend.bus_id) as bus:
         logger.info("%s: %s", backend.name, backend.cancel_cut_power(bus))
     return 0
@@ -526,6 +502,11 @@ def guard(threshold=None, force=False):
     if not sugar.available:
         logger.warning("PiSugar unreachable - not acting")
         return 1
+    if not sugar.backend.writable:
+        # Without a charge state the guard cannot tell a low battery on its
+        # own from one that is already being charged.
+        logger.info("%s is read-only here - no low-battery shutdown", sugar.backend.name)
+        return 0
     if sugar.charging or sugar.percent > threshold:
         return 0
 
@@ -555,8 +536,16 @@ def status():
         return 1
 
     board = sugar.backend
-    state = "charging" if sugar.charging else "on battery"
-    note = "" if board.tested else "   [UNTESTED - please report how it behaves]"
+    if sugar.charging is None:
+        state = "charge state not read on this board"
+    else:
+        state = "external power connected" if sugar.charging else "on battery"
+    if board.tested:
+        note = ""
+    elif not board.writable:
+        note = "   [EXPERIMENTAL - battery level only, please report how it behaves]"
+    else:
+        note = "   [UNTESTED - please report how it behaves]"
     print(f"board:   {board.name} on i2c-{board.bus_id} at 0x{board.addr:02x}{note}")
     print(f"battery: {sugar.percent}%  ({state})")
     print(f"config:  {CONFIG_PATH}")

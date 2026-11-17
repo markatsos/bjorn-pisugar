@@ -94,14 +94,15 @@ if command -v i2cdetect >/dev/null; then
     if echo "$table" | grep -q ' 57'; then
       FOUND_BOARD="PiSugar 3 (0x57) on i2c-$bus"; break
     elif echo "$table" | grep -q ' 75'; then
-      FOUND_BOARD="PiSugar 1/2 (0x75) on i2c-$bus"; break
+      FOUND_BOARD="PiSugar 2 / 2 Pro (0x75) on i2c-$bus"; break
     fi
   done
 fi
 if [ -n "$FOUND_BOARD" ]; then
   ok "$FOUND_BOARD"
   case "$FOUND_BOARD" in
-    *0x75*) warn "PiSugar 1/2 support is written from the datasheet and UNTESTED on hardware"
+    *0x75*) warn "PiSugar 2 boards are EXPERIMENTAL and read-only: battery level only,"
+            warn "no charge state, no low-battery shutdown, no power cut"
             warn "please open an issue with what you see - good or bad" ;;
   esac
 else

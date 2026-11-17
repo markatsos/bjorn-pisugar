@@ -36,7 +36,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 logger = logging.getLogger("pisugar")
 

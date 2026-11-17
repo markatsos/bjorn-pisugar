@@ -44,7 +44,8 @@ now stays off until `pisugar_model` names the board, so a 0.2.0 install that was
 - Hand-edited string booleans (`"false"`) are read correctly, and the threshold and delay
   are clamped to their valid ranges.
 - `--status` shows the version, the battery voltage and why power control is on or off.
-  New `--detect` command.
+  New `--detect` command. A guard run started by hand (`--guard N`) says why it does
+  not shut down, instead of exiting silently.
 - 44 tests that run without hardware: `python3 -m unittest discover -s tests -v`.
 
 Tested on Raspberry Pi Zero 2 W, PiSugar 3, Waveshare 2.13" V4, Raspberry Pi OS Bookworm

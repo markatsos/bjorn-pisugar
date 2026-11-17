@@ -621,6 +621,15 @@ def cancel_cut_power():
     return 0
 
 
+def _no_shutdown_reason(percent, plugged, threshold):
+    """Why the guard leaves the Pi alone, or None when the battery is low."""
+    if plugged:
+        return "external power connected"
+    if percent > threshold:
+        return f"battery at {percent}%, above the {threshold}% threshold"
+    return None
+
+
 def guard(threshold=None, force=False):
     """Halt the Pi when the battery is at or below the threshold and unplugged.
 
@@ -654,9 +663,16 @@ def guard(threshold=None, force=False):
     try:
         with SMBus(board.bus_id) as bus:
             percent, plugged = board.read(bus)
-        if plugged or percent > threshold:
+        reason = _no_shutdown_reason(percent, plugged, threshold)
+        if reason:
+            # The timer runs this every two minutes, so only a run started by
+            # hand says why nothing happened.
+            if force:
+                logger.info("%s - not shutting down", reason)
             return 0
         first = percent
+        if force:
+            logger.info("Battery at %d%% and unplugged - checking again in 10 seconds", first)
         time.sleep(10)
         with SMBus(board.bus_id) as bus:
             percent, plugged = board.read(bus)

@@ -188,6 +188,23 @@ class ExplicitModelTest(BoardTestCase):
         self.assertEqual(pisugar.guard(), 0)
         self.assertNoPoweroff()
 
+    def test_a_forced_run_says_why_it_does_nothing(self):
+        self.bus.registers[(0x57, 0x02)] |= 0x80
+        self.configure(pisugar_model="pisugar3")
+        pisugar.logger.disabled = False
+        with self.assertLogs("pisugar", level="INFO") as logs:
+            self.assertEqual(pisugar.guard(100, force=True), 0)
+        self.assertIn("external power connected - not shutting down", logs.output[0])
+        self.assertNoPoweroff()
+
+    def test_a_timer_run_stays_quiet_when_there_is_nothing_to_do(self):
+        self.bus.registers[(0x57, 0x02)] |= 0x80
+        self.configure(pisugar_model="pisugar3")
+        pisugar.logger.disabled = False
+        with mock.patch.object(pisugar.logger, "info") as info:
+            self.assertEqual(pisugar.guard(), 0)
+        info.assert_not_called()
+
     def test_cut_power_switch_still_applies(self):
         self.configure(pisugar_model="pisugar3", pisugar_cut_power=False)
         self.assertEqual(pisugar.cut_power(), 0)

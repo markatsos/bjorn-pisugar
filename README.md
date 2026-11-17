@@ -181,7 +181,8 @@ python3 /home/bjorn/Bjorn/pisugar.py --cancel      # abort a countdown
 ```
 
 `--guard 100` is the honest way to test the shutdown path without waiting for the
-battery to drain. Unplug first, or it will correctly refuse to act. `--guard`,
+battery to drain. Unplug first: with external power connected it says so and does
+nothing. On battery, it reads again ten seconds later and then shuts down. `--guard`,
 `--cut-power` and `--cancel` all need `pisugar_model` set to `pisugar3`, and exit with
 status 3 if it is not.
 

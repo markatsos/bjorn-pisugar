@@ -20,6 +20,7 @@ written from the PiSugar datasheets and the official power manager's source; the
 have never been run on a real board. See the README.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -160,21 +161,43 @@ class PiSugar3(Backend):
         ctrl1 = bus.read_byte_data(self.addr, self.REG_CTRL1)
         return max(0, min(100, percent)), bool(ctrl1 & self.BIT_EXTERNAL_POWER)
 
+    @contextlib.contextmanager
+    def _write_unlocked(self, bus):
+        """Lift write protection for the duration of the block.
+
+        Protection goes back on in a `finally`, so an I2C error halfway through
+        cannot leave the registers writable. The unlock itself is inside the try:
+        a write that fails on the wire may still have reached the board. If
+        re-locking fails as well, that is logged; it is only raised when the block
+        itself succeeded, so it never hides the error that caused the failure.
+        """
+        completed = False
+        try:
+            bus.write_byte_data(self.addr, self.REG_WRITE_ENABLE, self.WRITE_UNLOCK)
+            yield
+            completed = True
+        finally:
+            try:
+                bus.write_byte_data(self.addr, self.REG_WRITE_ENABLE, self.WRITE_LOCK)
+            except Exception as e:
+                logger.error("PiSugar 3: could not restore write protection (0x0B): %s", e)
+                if completed:
+                    raise
+
     def cut_power(self, bus, delay):
-        # Order matters: 0x09 must be set before 0x02 is touched, or the board
-        # ignores the delay entirely and nothing happens.
-        bus.write_byte_data(self.addr, self.REG_WRITE_ENABLE, self.WRITE_UNLOCK)
-        bus.write_byte_data(self.addr, self.REG_DELAY, max(0, min(255, int(delay))))
-        ctrl1 = bus.read_byte_data(self.addr, self.REG_CTRL1)
-        bus.write_byte_data(self.addr, self.REG_CTRL1, ctrl1 & ~self.BIT_OUTPUT_DELAY)
-        bus.write_byte_data(self.addr, self.REG_WRITE_ENABLE, self.WRITE_LOCK)
+        delay = max(0, min(255, int(delay)))
+        with self._write_unlocked(bus):
+            # Order matters: 0x09 must be set before 0x02 is touched, or the board
+            # ignores the delay entirely and nothing happens.
+            bus.write_byte_data(self.addr, self.REG_DELAY, delay)
+            ctrl1 = bus.read_byte_data(self.addr, self.REG_CTRL1)
+            bus.write_byte_data(self.addr, self.REG_CTRL1, ctrl1 & ~self.BIT_OUTPUT_DELAY & 0xFF)
         return f"countdown started, rail drops in ~{delay}s"
 
     def cancel_cut_power(self, bus):
-        bus.write_byte_data(self.addr, self.REG_WRITE_ENABLE, self.WRITE_UNLOCK)
-        ctrl1 = bus.read_byte_data(self.addr, self.REG_CTRL1)
-        bus.write_byte_data(self.addr, self.REG_CTRL1, ctrl1 | self.BIT_OUTPUT_DELAY)
-        bus.write_byte_data(self.addr, self.REG_WRITE_ENABLE, self.WRITE_LOCK)
+        with self._write_unlocked(bus):
+            ctrl1 = bus.read_byte_data(self.addr, self.REG_CTRL1)
+            bus.write_byte_data(self.addr, self.REG_CTRL1, ctrl1 | self.BIT_OUTPUT_DELAY)
         return "countdown cancelled"
 
 

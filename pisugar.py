@@ -30,7 +30,10 @@ import time
 
 logger = logging.getLogger("pisugar")
 
-BJORN_DIR = os.environ.get("BJORN_DIR", "/home/bjorn/Bjorn")
+# The installed copy lives in Bjorn's own directory, so that is the default. The
+# systemd units pass BJORN_DIR explicitly as well, which also covers running a
+# copy from somewhere else.
+BJORN_DIR = os.environ.get("BJORN_DIR") or os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BJORN_DIR, "config", "shared_config.json")
 
 DEFAULTS = {
@@ -46,18 +49,39 @@ DEFAULTS = {
 CANDIDATE_BUSES = (1, 0)
 
 
+def read_config(path=None):
+    """Bjorn's config as a dict. Raises if it is missing, unreadable or malformed."""
+    with open(path or CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError("top level is not a JSON object")
+    return config
+
+
+def settings_from_file():
+    """Return (settings, None), or (None, reason) if the config cannot be read.
+
+    The guard and the power cut act on the hardware, so they must not fall back to
+    the defaults: those have both features enabled, and a wrong path would
+    silently override whatever the user switched off in the web UI.
+    """
+    try:
+        return load_settings(read_config()), None
+    except Exception as e:
+        return None, f"cannot read {CONFIG_PATH}: {e}"
+
+
 def load_settings(config=None):
     """Merge Bjorn's config over the defaults.
 
-    `config` is the live dict when running inside Bjorn; standalone runs read the
-    file. A missing or broken file falls back to the defaults rather than
-    disabling the guard — a typo should not cost you the battery.
+    `config` is the live dict when running inside Bjorn. Without one the file is
+    read on a best-effort basis, which is good enough for drawing the indicator;
+    anything that acts on the hardware uses settings_from_file() instead.
     """
     values = dict(DEFAULTS)
     if config is None:
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                config = json.load(f)
+            config = read_config()
         except Exception as e:
             logger.warning("Could not read %s (%s) - using defaults", CONFIG_PATH, e)
             config = {}
@@ -446,8 +470,12 @@ def draw_battery(image, draw, shared_data, sugar, sx=1.0, sy=1.0):
 # CLI                                                                          #
 # --------------------------------------------------------------------------- #
 
-def _with_board(fn):
-    settings = load_settings()
+def _with_board():
+    """(board, settings) for a command that acts on the hardware, or (None, None)."""
+    settings, error = settings_from_file()
+    if error:
+        logger.error("%s - not acting", error)
+        return None, None
     backend = detect(settings["pisugar_model"])
     if backend is None:
         logger.warning("No PiSugar found - is the board switched on?")
@@ -456,7 +484,7 @@ def _with_board(fn):
 
 
 def cut_power(delay=None, respect_config=True):
-    backend, settings = _with_board(None)
+    backend, settings = _with_board()
     if backend is None:
         return 1
     if respect_config and not settings["pisugar_cut_power"]:
@@ -470,7 +498,7 @@ def cut_power(delay=None, respect_config=True):
 
 
 def cancel_cut_power():
-    backend, _ = _with_board(None)
+    backend, _ = _with_board()
     if backend is None:
         return 1
     with _smbus()(backend.bus_id) as bus:
@@ -484,7 +512,10 @@ def guard(threshold=None, force=False):
     Reads twice, ten seconds apart. A fuel gauge can report one bad sample, and a
     spurious shutdown in the middle of a scan is worse than one ten seconds late.
     """
-    settings = load_settings()
+    settings, error = settings_from_file()
+    if error:
+        logger.error("%s - not acting", error)
+        return 1
     if not force and not settings["pisugar_autoshutdown"]:
         return 0
     if threshold is None:
@@ -511,7 +542,11 @@ def guard(threshold=None, force=False):
 
 
 def status():
-    settings = load_settings()
+    settings, error = settings_from_file()
+    if error:
+        print(f"config:  {error}")
+        print("         the guard and the power cut will not act until this is fixed")
+        settings = load_settings({})
     sugar = PiSugar(refresh=0, model=settings["pisugar_model"])
     sugar.read(force=True)
     if not sugar.available:

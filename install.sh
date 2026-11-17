@@ -17,6 +17,15 @@ info() { echo "  ..   $*"; }
 die()  { echo "${RED}error${NC}  $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run this with sudo"
+# BJORN_DIR is written into the systemd units, so keep it to characters that
+# need no quoting there.
+case "$BJORN_DIR" in
+  /*) ;;
+  *) die "BJORN_DIR must be an absolute path" ;;
+esac
+case "$BJORN_DIR" in
+  *[!A-Za-z0-9._/-]*) die "BJORN_DIR may only contain letters, digits and . _ - /" ;;
+esac
 [ -f "$DISPLAY_PY" ] || die "no Bjorn at $BJORN_DIR (set BJORN_DIR= to point elsewhere)"
 [ -f "$CONFIG_JSON" ] || die "no config at $CONFIG_JSON"
 

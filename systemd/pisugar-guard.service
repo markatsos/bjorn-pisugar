@@ -3,4 +3,5 @@ Description=Shut Bjorn down when the PiSugar battery runs low
 
 [Service]
 Type=oneshot
+Environment=BJORN_DIR=@BJORN_DIR@
 ExecStart=/usr/bin/python3 @BJORN_DIR@/pisugar.py --guard

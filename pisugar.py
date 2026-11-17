@@ -358,6 +358,19 @@ class PiSugar:
             self._SMBus = None
             logger.warning("smbus2 not installed - PiSugar support disabled")
 
+    def set_model(self, model):
+        """Follow a change of `pisugar_model` made on the Config page.
+
+        A new value drops the board found so far and forces a fresh read, so the
+        next frame uses the new setting rather than whatever was detected before.
+        """
+        if model == self.model:
+            return
+        self.model = model
+        self.backend = None
+        self.available = False
+        self._last_read = 0.0
+
     def read(self, force=False):
         if self._SMBus is None:
             return
@@ -389,9 +402,13 @@ def draw_battery(image, draw, shared_data, sugar, sx=1.0, sy=1.0):
     coordinates, so it lands correctly on a 122px 2.13" and a 176px 2.7" alike.
     Silent no-op when the board is off or the setting is disabled.
     """
-    if not load_settings(getattr(shared_data, "config", None))["pisugar_show_battery"]:
+    settings = load_settings(getattr(shared_data, "config", None))
+    if not settings["pisugar_show_battery"]:
         return
 
+    # display.py creates the reader once, with the default model. Take the model
+    # from the live config on every frame, so the override applies here too.
+    sugar.set_model(settings["pisugar_model"])
     sugar.read()
     if not sugar.available:
         return

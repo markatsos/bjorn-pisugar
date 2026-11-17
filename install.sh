@@ -239,5 +239,7 @@ echo
 BJORN_DIR="$BJORN_DIR" python3 "$BJORN_DIR/pisugar.py" --status || true
 echo
 echo "Settings live in the web UI: Config -> PiSugar (press Save, it does not autosave)"
+echo "Power control - the low-battery shutdown and the power cut - stays off until"
+echo "pisugar_model names the board: set it to pisugar3 for a PiSugar 3."
 echo "Manual shutdown is already there: Playground -> gear dropdown -> Shutdown"
 echo

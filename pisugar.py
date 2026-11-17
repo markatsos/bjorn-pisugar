@@ -9,12 +9,17 @@ Three jobs, one module:
 Settings live in Bjorn's own config/shared_config.json, so they render as
 switches and fields on the web UI's Config page without touching any HTML.
 
-Boards:
+Boards, by their pisugar_model value:
 
-  PiSugar 3 / 3 Plus      0x57   level and charge state from the controller,
-                                 low-battery shutdown, timed power cut
-  PiSugar 2 (2 or 4 LEDs) 0x75   IP5209 - battery level from voltage, read-only
-  PiSugar 2 Pro / 2 Plus  0x75   IP5312 - battery level from voltage, read-only
+  pisugar3     PiSugar 3 / 3 Plus      0x57   level and charge state from the
+                                              controller, low-battery shutdown,
+                                              timed power cut
+  pisugar2     PiSugar 2 (2 or 4 LEDs) 0x75   IP5209 - level from voltage, read-only
+  pisugar2pro  PiSugar 2 Pro / 2 Plus  0x75   IP5312 - level from voltage, read-only
+
+The default, "auto", finds the board for the indicator and does nothing else.
+Nothing writes to a register or shuts the Pi down until pisugar_model names a
+board with power control, and that board passes an identity check.
 
 Only the PiSugar 3 path is verified on hardware. The PiSugar 2 boards are
 experimental and are never written to: their charge-state detection differs
@@ -30,6 +35,8 @@ import os
 import subprocess
 import sys
 import time
+
+VERSION = "0.3.0"
 
 logger = logging.getLogger("pisugar")
 
@@ -48,8 +55,66 @@ DEFAULTS = {
     "pisugar_model": "auto",
 }
 
+# Values for pisugar_model. Anything that writes to a register or shuts the Pi
+# down needs the board named here; "auto" only ever reads. The names are not
+# numbers on purpose: Bjorn's Config page saves a value like "3" as the number 3
+# and from then on renders the field as a number input, which cannot hold "auto".
+MODELS = ("auto", "pisugar3", "pisugar2", "pisugar2pro")
+
+# Values written by 0.2.0 and earlier.
+MODEL_ALIASES = {
+    "3": "pisugar3",
+    "2": "pisugar2", "ip5209": "pisugar2",
+    "2pro": "pisugar2pro", "2plus": "pisugar2pro", "ip5312": "pisugar2pro",
+    "pisugar2plus": "pisugar2pro",
+}
+UNSUPPORTED_MODELS = {
+    "1": "PiSugar 1 has no I2C (IP5306) and cannot be read",
+    "pisugar1": "PiSugar 1 has no I2C (IP5306) and cannot be read",
+}
+
 # Buses to probe, in order. Pi rev 1 boards wired the header to i2c-0.
 CANDIDATE_BUSES = (1, 0)
+
+_warned = set()
+
+
+def _warn_once(message, *args):
+    key = message % args
+    if key not in _warned:
+        _warned.add(key)
+        logger.warning(message, *args)
+
+
+def canonical_model(value):
+    """The canonical name for a pisugar_model value, or None if it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    name = str(value).strip().lower()
+    if name == "":
+        return "auto"
+    name = MODEL_ALIASES.get(name, name)
+    return name if name in MODELS else None
+
+
+def normalize_model(value):
+    """Like canonical_model(), but falls back to "auto" - which never acts - with a warning."""
+    name = canonical_model(value)
+    if name is not None:
+        return name
+    reason = UNSUPPORTED_MODELS.get(str(value).strip().lower(), "not a known model")
+    _warn_once("pisugar_model %r: %s - treating it as auto", value, reason)
+    return "auto"
+
+
+def _as_bool(value):
+    # Bjorn's Config page stores real booleans; a hand-edited "false" must not
+    # come out as True.
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
 
 
 def read_config(path=None):
@@ -90,15 +155,17 @@ def load_settings(config=None):
             config = {}
     for key, fallback in DEFAULTS.items():
         value = config.get(key, fallback)
-        if isinstance(fallback, bool):
-            values[key] = bool(value)
-        elif isinstance(fallback, str):
-            values[key] = str(value).strip().lower() or fallback
+        if key == "pisugar_model":
+            values[key] = normalize_model(value)
+        elif isinstance(fallback, bool):
+            values[key] = _as_bool(value)
         else:
             try:
                 values[key] = int(value)
             except (TypeError, ValueError):
                 values[key] = fallback
+    values["pisugar_shutdown_percent"] = max(0, min(100, values["pisugar_shutdown_percent"]))
+    values["pisugar_cut_power_delay"] = max(0, min(255, values["pisugar_cut_power_delay"]))
     return values
 
 
@@ -135,6 +202,7 @@ class NotSupported(Exception):
 class Backend:
     """One battery board. Subclasses know their own registers."""
 
+    key = ""            # the pisugar_model value that selects this board
     name = "unknown"
     addr = 0x00
     tested = False      # run on real hardware
@@ -151,6 +219,14 @@ class Backend:
         """Return (percent 0-100, external power present - or None if not read)."""
         raise NotImplementedError
 
+    def voltage(self, bus):
+        """Battery voltage in volts."""
+        raise NotImplementedError
+
+    def check_identity(self, bus):
+        """None if the board looks right for power control, else what is wrong."""
+        return f"{self.name}: no power control on this board"
+
     def cut_power(self, bus, delay):
         """Arrange for the rail to drop once the Pi is down. Returns a description."""
         raise NotSupported(f"{self.name}: no power control on this board")
@@ -166,9 +242,11 @@ class PiSugar3(Backend):
     0x02 bit 5  output switch with delay; clearing it starts the 0x09 countdown
     0x09        countdown length before the rail is cut, 0-255
     0x0B        write 0x29 to unlock the other registers, 0x00 to lock again
+    0x22/0x23   battery voltage in mV, high byte first
     0x2A        calculated battery percentage, 0-100
     """
 
+    key = "pisugar3"
     name = "PiSugar 3"
     addr = 0x57
     tested = True
@@ -177,6 +255,8 @@ class PiSugar3(Backend):
     REG_CTRL1 = 0x02
     REG_DELAY = 0x09
     REG_WRITE_ENABLE = 0x0B
+    REG_VOLTAGE_HIGH = 0x22
+    REG_VOLTAGE_LOW = 0x23
     REG_PERCENT = 0x2A
     WRITE_UNLOCK = 0x29
     WRITE_LOCK = 0x00
@@ -193,6 +273,26 @@ class PiSugar3(Backend):
         percent = bus.read_byte_data(self.addr, self.REG_PERCENT)
         ctrl1 = bus.read_byte_data(self.addr, self.REG_CTRL1)
         return max(0, min(100, percent)), bool(ctrl1 & self.BIT_EXTERNAL_POWER)
+
+    def voltage(self, bus):
+        high = bus.read_byte_data(self.addr, self.REG_VOLTAGE_HIGH)
+        low = bus.read_byte_data(self.addr, self.REG_VOLTAGE_LOW)
+        return ((high << 8) | low) / 1000.0
+
+    def check_identity(self, bus):
+        """A stricter check than probe(), run before anything is written.
+
+        probe() only asks whether something at 0x57 returns a plausible
+        percentage. Before the write-protection register is touched, the battery
+        voltage has to be plausible for a single Li-ion cell as well.
+        """
+        percent = bus.read_byte_data(self.addr, self.REG_PERCENT)
+        if percent > 100:
+            return f"0x{self.REG_PERCENT:02x} reads {percent}, not a percentage"
+        volts = self.voltage(bus)
+        if not 2.5 <= volts <= 4.6:
+            return f"battery voltage reads {volts:.3f} V, outside 2.5-4.6 V"
+        return None
 
     @contextlib.contextmanager
     def _write_unlocked(self, bus):
@@ -246,6 +346,7 @@ class IP5209(Backend):
     battery level, but no charge state, no low-battery shutdown and no power cut.
     """
 
+    key = "pisugar2"
     name = "PiSugar 2 (IP5209)"
     addr = 0x75
     tested = False
@@ -284,6 +385,7 @@ class IP5312(IP5209):
     so only the voltage is read.
     """
 
+    key = "pisugar2pro"
     name = "PiSugar 2 Pro / 2 Plus (IP5312)"
     addr = 0x75
     tested = False
@@ -302,28 +404,30 @@ class IP5312(IP5209):
 # IP5312 is tried before IP5209: they share address 0x75, and the 5312 registers
 # read back as zero on a 5209, which its probe rejects.
 BACKENDS = (PiSugar3, IP5312, IP5209)
-BY_NAME = {"3": PiSugar3, "pisugar3": PiSugar3,
-           "ip5312": IP5312, "2pro": IP5312, "2plus": IP5312,
-           "ip5209": IP5209, "2": IP5209}
-UNSUPPORTED = {"1": "PiSugar 1 has no I2C (IP5306) and cannot be read"}
+BY_MODEL = {cls.key: cls for cls in BACKENDS}
+
+
+def _bus_exists(bus_id):
+    return os.path.exists(f"/dev/i2c-{bus_id}")
 
 
 def detect(model="auto"):
-    """Find the board. Returns a Backend instance, or None if nothing answers."""
-    SMBus = _smbus()
-    wanted = None if model in ("", "auto") else BY_NAME.get(model)
-    if model in UNSUPPORTED:
-        logger.warning("pisugar_model %r: %s - falling back to auto", model, UNSUPPORTED[model])
-    elif model not in ("", "auto") and wanted is None:
-        logger.warning("Unknown pisugar_model %r - falling back to auto", model)
+    """Find the board. Returns a Backend instance, or None if nothing answers.
 
+    With "auto" every board is tried. With a model named, only that board is,
+    and it still has to answer its probe - a wrong setting finds nothing rather
+    than reading another chip's registers as if they were the named board's.
+    """
+    model = normalize_model(model)
+    candidates = BACKENDS if model == "auto" else (BY_MODEL[model],)
+    SMBus = _smbus()
     for bus_id in CANDIDATE_BUSES:
-        if not os.path.exists(f"/dev/i2c-{bus_id}"):
+        if not _bus_exists(bus_id):
             continue
-        for cls in ((wanted,) if wanted else BACKENDS):
+        for cls in candidates:
             try:
                 with SMBus(bus_id) as bus:
-                    if wanted or cls.probe(bus, bus_id):
+                    if cls.probe(bus, bus_id):
                         return cls(bus_id)
             except Exception:
                 continue
@@ -437,48 +541,83 @@ def draw_battery(image, draw, shared_data, sugar, sx=1.0, sy=1.0):
 
 
 # --------------------------------------------------------------------------- #
-# CLI                                                                          #
+# Power control                                                                #
 # --------------------------------------------------------------------------- #
 
-def _with_board():
-    """(board, settings) for a command that acts on the hardware, or (None, None)."""
-    settings, error = settings_from_file()
-    if error:
-        logger.error("%s - not acting", error)
-        return None, None
-    backend = detect(settings["pisugar_model"])
-    if backend is None:
-        logger.warning("No PiSugar found - is the board switched on?")
-        return None, settings
-    return backend, settings
+class NotConfigured(Exception):
+    """Power control is off by configuration - the normal state until the board is named."""
+
+
+class BoardError(Exception):
+    """The named board is missing, or does not look like the board it was named as."""
+
+
+def power_board(settings):
+    """The board that the guard and the power cut may act on.
+
+    Raises NotConfigured unless pisugar_model names a board with power control -
+    auto-detection alone is never enough to write to a register or to shut the Pi
+    down - and BoardError if that board does not answer or fails its identity check.
+    """
+    model = settings["pisugar_model"]
+    if model == "auto":
+        raise NotConfigured("pisugar_model is auto - set it to pisugar3 to enable power control")
+    cls = BY_MODEL[model]
+    if not cls.writable:
+        raise NotConfigured(f"{cls.name} is read-only here - no power control on this board")
+    board = detect(model)
+    if board is None:
+        raise BoardError(f"no {cls.name} answering - is the board switched on?")
+    with _smbus()(board.bus_id) as bus:
+        problem = board.check_identity(bus)
+    if problem:
+        raise BoardError(f"the device at 0x{board.addr:02x} failed the {cls.name} check: {problem}")
+    return board
 
 
 def cut_power(delay=None, respect_config=True):
-    backend, settings = _with_board()
-    if backend is None:
+    """Start the countdown that switches the board off once the Pi has halted.
+
+    Run by pisugar-poweroff.service on the way down, where "nothing to do" -
+    power control off, or pisugar_cut_power switched off - is not an error.
+    """
+    settings, error = settings_from_file()
+    if error:
+        logger.error("%s - leaving the rail alone", error)
         return 1
-    if not backend.writable:
-        logger.info("%s is read-only here - no power cut", backend.name)
-        return 0
     if respect_config and not settings["pisugar_cut_power"]:
         logger.info("pisugar_cut_power is off - leaving the rail alone")
         return 0
+    try:
+        board = power_board(settings)
+    except NotConfigured as e:
+        logger.info("%s - leaving the rail alone", e)
+        return 0 if respect_config else 3
+    except BoardError as e:
+        logger.error("%s - leaving the rail alone", e)
+        return 1
     if delay is None:
         delay = settings["pisugar_cut_power_delay"]
-    with _smbus()(backend.bus_id) as bus:
-        logger.info("%s: %s", backend.name, backend.cut_power(bus, delay))
+    with _smbus()(board.bus_id) as bus:
+        logger.info("%s: %s", board.name, board.cut_power(bus, delay))
     return 0
 
 
 def cancel_cut_power():
-    backend, _ = _with_board()
-    if backend is None:
+    settings, error = settings_from_file()
+    if error:
+        logger.error("%s - not writing to the board", error)
         return 1
-    if not backend.writable:
-        logger.info("%s is read-only here - there is no countdown to cancel", backend.name)
-        return 0
-    with _smbus()(backend.bus_id) as bus:
-        logger.info("%s: %s", backend.name, backend.cancel_cut_power(bus))
+    try:
+        board = power_board(settings)
+    except NotConfigured as e:
+        logger.error("%s - not writing to the board", e)
+        return 3
+    except BoardError as e:
+        logger.error("%s - not writing to the board", e)
+        return 1
+    with _smbus()(board.bus_id) as bus:
+        logger.info("%s: %s", board.name, board.cancel_cut_power(bus))
     return 0
 
 
@@ -497,61 +636,112 @@ def guard(threshold=None, force=False):
     if threshold is None:
         threshold = settings["pisugar_shutdown_percent"]
 
-    sugar = PiSugar(refresh=0, model=settings["pisugar_model"])
-    sugar.read(force=True)
-    if not sugar.available:
-        logger.warning("PiSugar unreachable - not acting")
+    try:
+        board = power_board(settings)
+    except NotConfigured as e:
+        # The timer fires every two minutes; with power control off by choice,
+        # say nothing. --status explains why the guard is idle.
+        if force:
+            logger.error("%s - not acting", e)
+            return 3
+        logger.debug("%s - not acting", e)
+        return 0
+    except BoardError as e:
+        logger.warning("%s - not acting", e)
         return 1
-    if not sugar.backend.writable:
-        # Without a charge state the guard cannot tell a low battery on its
-        # own from one that is already being charged.
-        logger.info("%s is read-only here - no low-battery shutdown", sugar.backend.name)
-        return 0
-    if sugar.charging or sugar.percent > threshold:
-        return 0
 
-    first = sugar.percent
-    time.sleep(10)
-    sugar.read(force=True)
-    if not sugar.available or sugar.charging or sugar.percent > threshold:
+    SMBus = _smbus()
+    try:
+        with SMBus(board.bus_id) as bus:
+            percent, plugged = board.read(bus)
+        if plugged or percent > threshold:
+            return 0
+        first = percent
+        time.sleep(10)
+        with SMBus(board.bus_id) as bus:
+            percent, plugged = board.read(bus)
+    except OSError as e:
+        logger.warning("%s stopped answering (%s) - not acting", board.name, e)
+        return 1
+    if plugged or percent > threshold:
         logger.info("Low reading of %d%% not confirmed - ignoring", first)
         return 0
 
-    logger.warning("Battery at %d%% and unplugged - shutting down", sugar.percent)
+    logger.warning("Battery at %d%% and unplugged - shutting down", percent)
     subprocess.run(["systemctl", "poweroff"], check=False)
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# CLI                                                                          #
+# --------------------------------------------------------------------------- #
+
 def status():
+    rc = 0
+    print(f"bjorn-pisugar {VERSION}")
     settings, error = settings_from_file()
     if error:
         print(f"config:  {error}")
-        print("         the guard and the power cut will not act until this is fixed")
+        print("         the guard and the power cut do nothing until this is fixed")
         settings = load_settings({})
-    sugar = PiSugar(refresh=0, model=settings["pisugar_model"])
-    sugar.read(force=True)
-    if not sugar.available:
-        print("No PiSugar reachable - is the board switched on?")
-        print(f"config: {CONFIG_PATH}  (pisugar_model = {settings['pisugar_model']})")
-        return 1
+        rc = 1
+    else:
+        print(f"config:  {CONFIG_PATH}")
 
-    board = sugar.backend
-    if sugar.charging is None:
-        state = "charge state not read on this board"
+    model = settings["pisugar_model"]
+    board = detect(model)
+    if board is None:
+        wanted = "PiSugar" if model == "auto" else BY_MODEL[model].name
+        print(f"board:   no {wanted} answering - is the board switched on?")
+        rc = 1
     else:
-        state = "external power connected" if sugar.charging else "on battery"
-    if board.tested:
-        note = ""
-    elif not board.writable:
-        note = "   [EXPERIMENTAL - battery level only, please report how it behaves]"
-    else:
-        note = "   [UNTESTED - please report how it behaves]"
-    print(f"board:   {board.name} on i2c-{board.bus_id} at 0x{board.addr:02x}{note}")
-    print(f"battery: {sugar.percent}%  ({state})")
-    print(f"config:  {CONFIG_PATH}")
+        if board.tested:
+            note = ""
+        elif not board.writable:
+            note = "   [EXPERIMENTAL - battery level only, please report how it behaves]"
+        else:
+            note = "   [UNTESTED - please report how it behaves]"
+        print(f"board:   {board.name} on i2c-{board.bus_id} at 0x{board.addr:02x}{note}")
+        with _smbus()(board.bus_id) as bus:
+            percent, plugged = board.read(bus)
+            try:
+                volts = f", {board.voltage(bus):.2f} V"
+            except Exception:
+                volts = ""
+        if plugged is None:
+            state = "charge state not read on this board"
+        else:
+            state = "external power connected" if plugged else "on battery"
+        print(f"battery: {percent}%{volts}, {state}")
+
+    try:
+        power_board(settings)
+        parts = []
+        if settings["pisugar_autoshutdown"]:
+            parts.append(f"shutdown at {settings['pisugar_shutdown_percent']}%")
+        if settings["pisugar_cut_power"]:
+            parts.append(f"power cut {settings['pisugar_cut_power_delay']}s after halt")
+        print("power:   " + (", ".join(parts) if parts else "both switched off in Config"))
+    except (NotConfigured, BoardError) as e:
+        print(f"power:   off - {e}")
+
+    print("settings:")
     for key in sorted(DEFAULTS):
         print(f"  {key} = {settings[key]}")
+    return rc
+
+
+def detect_command():
+    """One line for install.sh: "<model> <bus> <name>", or "none". Read-only."""
+    board = detect("auto")
+    if board is None:
+        print("none")
+        return 1
+    print(f"{board.key} {board.bus_id} {board.name}")
     return 0
+
+
+USAGE = "[--status | --detect | --guard [PCT] | --cut-power [SECONDS] | --cancel]"
 
 
 def _main(argv):
@@ -559,18 +749,27 @@ def _main(argv):
 
     cmd = argv[1] if len(argv) > 1 else "--status"
     arg = argv[2] if len(argv) > 2 else None
+    try:
+        number = int(arg) if arg is not None else None
+    except ValueError:
+        cmd = None
 
-    if cmd == "--status":
-        return status()
-    if cmd == "--cut-power":
-        return cut_power(int(arg) if arg else None, respect_config=arg is None)
-    if cmd == "--cancel":
-        return cancel_cut_power()
-    if cmd == "--guard":
-        return guard(int(arg) if arg else None, force=arg is not None)
+    try:
+        if cmd == "--status":
+            return status()
+        if cmd == "--detect":
+            return detect_command()
+        if cmd == "--cut-power":
+            return cut_power(number, respect_config=number is None)
+        if cmd == "--cancel":
+            return cancel_cut_power()
+        if cmd == "--guard":
+            return guard(number, force=number is not None)
+    except ImportError as e:
+        print(f"smbus2 is not installed ({e}) - run install.sh, or apt install python3-smbus2")
+        return 1
 
-    print(f"usage: {os.path.basename(argv[0])} "
-          "[--status | --cut-power [N] | --cancel | --guard [PCT]]")
+    print(f"usage: {os.path.basename(argv[0])} {USAGE}")
     return 2
 
 

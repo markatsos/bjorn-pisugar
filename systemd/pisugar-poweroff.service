@@ -6,6 +6,7 @@ Before=poweroff.target halt.target
 
 [Service]
 Type=oneshot
+Environment=BJORN_DIR=@BJORN_DIR@
 ExecStart=/usr/bin/python3 @BJORN_DIR@/pisugar.py --cut-power
 TimeoutStartSec=20
 

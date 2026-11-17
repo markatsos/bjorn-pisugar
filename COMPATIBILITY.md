@@ -1,7 +1,7 @@
 # Compatibility
 
-Everything here works in theory. Only the first row of each table has actually been run
-on hardware — the rest is written from the PiSugar datasheets and the Waveshare panel
+Only the first row of each table has actually been run on hardware. The rest is written
+from the PiSugar datasheets, the official power manager's source and the Waveshare panel
 dimensions, and needs somebody with the gear to confirm it.
 
 If you try a combination that is not ticked, please
@@ -11,27 +11,29 @@ from them.
 
 ## Battery boards
 
-| Board | Chip | Address | Level | Charge state | Power cut on halt | Status |
-|---|---|---|---|---|---|---|
-| PiSugar 3 | — | `0x57` | direct, `0x2A` | `0x02` bit 7 | timed countdown | ✅ verified |
-| PiSugar 3 Plus | — | `0x57` | direct, `0x2A` | `0x02` bit 7 | timed countdown | ⬜ untested — same registers, expected to work |
-| PiSugar 2 | IP5209 | `0x75` | from voltage curve | `0x55` bit 4 | light-load auto shutdown | ⬜ untested |
-| PiSugar 1 | IP5209 | `0x75` | from voltage curve | `0x55` bit 4 | light-load auto shutdown | ⬜ untested |
-| PiSugar 2 Pro | IP5312 | `0x75` | from voltage curve | `0xdd` = `0x1f` | light-load auto shutdown | ⬜ untested |
-| PiSugar 2 Plus | IP5312 | `0x75` | from voltage curve | `0xdd` = `0x1f` | light-load auto shutdown | ⬜ untested |
+| Board | `pisugar_model` | Chip | Address | Level | Charge state | Low-battery shutdown, power cut | Status |
+|---|---|---|---|---|---|---|---|
+| PiSugar 3 | `pisugar3` | — | `0x57` | direct, `0x2A` | `0x02` bit 7 | yes | ✅ verified |
+| PiSugar 3 Plus | `pisugar3` | — | `0x57` | direct, `0x2A` | `0x02` bit 7 | yes | ⬜ untested — same registers, expected to work |
+| PiSugar 2, 2-LED | `pisugar2` | IP5209 | `0x75` | from voltage | not read | not available | 🧪 experimental, read-only |
+| PiSugar 2, 4-LED | `pisugar2` | IP5209 | `0x75` | from voltage | not read | not available | 🧪 experimental, read-only |
+| PiSugar 2 Pro / 2 Plus | `pisugar2pro` | IP5312 | `0x75` | from voltage | not read | not available | 🧪 experimental, read-only |
+| PiSugar 1 | — | IP5306 | — | — | — | — | ❌ not supported — no I2C |
+| PiSugar S / S Plus | — | — | — | — | — | — | ❌ not supported — no I2C |
 
-Two differences worth knowing about the older boards.
+**Power control needs the model named.** With `pisugar_model` at `auto`, the board is
+detected for the indicator only: nothing is written and the Pi is never shut down. On a
+PiSugar 3, set `pisugar_model` to `pisugar3` to enable the low-battery shutdown and the
+power cut. Before anything is written, the board must also report a percentage of at most
+100 and a battery voltage between 2.5 and 4.6 V.
 
-**The level is derived, not measured.** The PiSugar 3 has a controller that reports a
-percentage directly. The IP5209 and IP5312 only give you battery voltage, so the
-percentage comes from the same ten-point interpolation curve the official PiSugar power
-manager uses. Expect it to be less steady, particularly under load.
-
-**Power cut works differently.** The PiSugar 3 takes a countdown in seconds and drops the
-rail when it expires. The older chips have no such timer — instead they have *light-load
-auto shutdown*: arm it, and once the current draw falls below a threshold for about eight
-seconds, the board switches itself off. Since a halted Pi draws almost nothing, the effect
-is the same, but `pisugar_cut_power_delay` is ignored on those boards.
+**The PiSugar 2 boards are read-only.** They report only battery voltage, so the level
+comes from the same ten-point curve the official power manager uses. Expect it to be less
+steady, particularly under load. Their charge state is not read: the 2-LED and 4-LED boards
+detect external power in different ways, and both need the chip's GPIOs configured first,
+which means writing to it. Without a charge state, the low-battery shutdown cannot tell a
+low battery on its own from one that is being charged. So until somebody tests these boards
+on real hardware, the add-on only reads their voltage and never writes to them.
 
 ## Displays
 
@@ -73,21 +75,22 @@ that wired the header differently.
 | `v1.0.0 alpha 2` — upstream `main` at [`61a4758`](https://github.com/infinition/Bjorn/commit/61a4758e5ee3d37d43c10eb690340626139912c0), 4 May 2026 | ✅ verified |
 | Bjorn V2 — unreleased, upstream `dev` / `ai` branches | ❌ not supported yet — `display.py` was rewritten |
 
-`install.sh` patches `display.py` by matching exact snippets of upstream source. If Bjorn
-changes those lines, the installer stops before touching `display.py` rather than producing
-a half-patched file. By that point it has already installed its packages and copied
-`pisugar.py`, so run `sudo ./uninstall.sh` to remove the copied files. If that happens to
-you, open an issue with the output of `cat /home/bjorn/Bjorn/version.txt` and we will add
-the new snippets.
+The add-on is pinned to the tested Bjorn version: `install.sh` patches `display.py` by
+matching exact snippets of upstream source. It checks for those snippets before it changes
+anything. If Bjorn has changed them, the installer stops with nothing installed, rather than
+producing a half-patched file. If that happens to you, open an issue with the output of
+`cat /home/bjorn/Bjorn/version.txt` and we will add the new snippets.
 
 ## Reporting a result
 
 ```bash
-python3 /home/bjorn/Bjorn/pisugar.py          # board, level, charge state, settings
+python3 /home/bjorn/Bjorn/pisugar.py          # version, board, level, voltage, power control
 i2cdetect -y 1
 cat /home/bjorn/Bjorn/version.txt
 uname -m
 ```
 
-Paste that, say which PiSugar and which panel you have, and whether the indicator, the
-low-battery shutdown and the power cut behaved. That is enough to turn a ⬜ into a ✅.
+Paste that, and say which PiSugar and which panel you have. Then say how the indicator
+behaved, and on a PiSugar 3 the low-battery shutdown and the power cut. That is enough to
+turn a ⬜ into a ✅. For a PiSugar 2, a reading of the battery level at a few known
+voltages is a good start towards making it more than read-only.

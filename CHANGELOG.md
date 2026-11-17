@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.1 — 2026-11-17
+
+A security fix from the PiSugar team's review in
+[PiSugar/pisugar-doc#5](https://github.com/PiSugar/pisugar-doc/pull/5).
+
+**Upgrading:** `git pull`, then `sudo ./install.sh`.
+
+- **The installer no longer writes through planted symbolic links.** It runs as root, but
+  Bjorn's directory belongs to the unprivileged `bjorn` user. 0.3.0 wrote every file
+  through a predictable temporary name, `<file>.pisugar-tmp`. A symbolic link placed there
+  in advance made root overwrite its target and hand it over to `bjorn`.
+- **How files are written now:**
+  - Temporary files get an unpredictable name, and are created with
+    `O_CREAT | O_EXCL | O_NOFOLLOW` relative to an open handle on the directory.
+  - Mode, owner and `fsync` are applied to the open file before it is renamed into place.
+  - A destination or directory that is a symbolic link is refused.
+  - A failed write removes only the temporary file it created.
+- The installer checks for symbolic links before changing anything, so it stops early
+  instead of failing halfway.
+- Seven new regression tests, one of which replays the reported attack. 53 tests in all.
+
 ## 0.3.0 — 2026-11-17
 
 Safety and correctness fixes from the PiSugar team's review in

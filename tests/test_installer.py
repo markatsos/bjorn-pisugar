@@ -249,5 +249,109 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.check(), 4)
 
 
+class SymlinkSafetyTest(unittest.TestCase):
+    """PiSugar/pisugar-doc#5: the installer runs as root in a directory the
+    unprivileged bjorn user can write to, so it must never write through a name
+    that user could have prepared."""
+
+    VICTIM = "root-owned file, do not touch\n"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bjorn = os.path.join(self.tmp, "Bjorn")
+        os.makedirs(os.path.join(self.bjorn, "config"))
+        self.display = os.path.join(self.bjorn, "display.py")
+        self.config = os.path.join(self.bjorn, "config", "shared_config.json")
+        self.module = os.path.join(self.bjorn, "pisugar.py")
+        InstallTest.write(self.display, STOCK_DISPLAY)
+        InstallTest.write(self.config, STOCK_CONFIG)
+        self.victim = os.path.join(self.tmp, "victim")
+        InstallTest.write(self.victim, self.VICTIM)
+        units = os.path.join(self.tmp, "units")
+        os.makedirs(units)
+        for name, value in (("STATE_DIR", os.path.join(self.tmp, "state")), ("UNIT_DIR", units)):
+            patcher = mock.patch.object(installer, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def assertVictimUntouched(self):
+        with open(self.victim, encoding="utf-8") as f:
+            self.assertEqual(f.read(), self.VICTIM)
+
+    def quietly(self, fn, *args, **kwargs):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return fn(*args, **kwargs)
+
+    def test_links_at_the_old_temporary_names_are_never_followed(self):
+        # 0.3.0 wrote every file through "<file>.pisugar-tmp": the reported attack.
+        planted = [p + ".pisugar-tmp" for p in (self.display, self.config, self.module)]
+        for link in planted:
+            os.symlink(self.victim, link)
+        self.quietly(installer.install, self.bjorn, ROOT, "narrow", "pisugar3")
+        self.assertVictimUntouched()
+        for link in planted:
+            self.assertTrue(os.path.islink(link), "a name the installer did not create was touched")
+        with open(self.display, encoding="utf-8") as f:
+            self.assertIn(installer.MARKER, f.read())
+        self.assertEqual(self.quietly(installer.uninstall, self.bjorn), 0)
+        self.assertVictimUntouched()
+
+    def test_a_link_at_the_chosen_temporary_name_is_not_followed(self):
+        # Make the "random" name known in advance and plant a link at it.
+        os.symlink(self.victim, os.path.join(self.bjorn, ".display.py.aaaa.pisugar-tmp"))
+        with mock.patch.object(installer.secrets, "token_hex", side_effect=["aaaa", "bbbb"]):
+            installer.write_file(self.display, "new content")
+        self.assertVictimUntouched()
+        with open(self.display, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "new content")
+        self.assertTrue(os.path.islink(os.path.join(self.bjorn, ".display.py.aaaa.pisugar-tmp")))
+
+    def test_a_destination_that_is_a_link_is_refused(self):
+        os.remove(self.display)
+        os.symlink(self.victim, self.display)
+        with self.assertRaisesRegex(installer.Refused, "symbolic link"):
+            installer.write_file(self.display, "new content")
+        self.assertVictimUntouched()
+        self.assertTrue(os.path.islink(self.display))
+
+    def test_a_directory_that_is_a_link_is_refused(self):
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        linked = os.path.join(self.tmp, "linked")
+        os.symlink(elsewhere, linked)
+        with self.assertRaisesRegex(installer.Refused, "symbolic link"):
+            installer.write_file(os.path.join(linked, "pisugar.py"), "x")
+        self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_preflight_refuses_links_before_anything_changes(self):
+        copy = os.path.join(self.tmp, "display-copy.py")
+        InstallTest.write(copy, STOCK_DISPLAY)
+        os.remove(self.display)
+        os.symlink(copy, self.display)
+        with self.assertRaisesRegex(installer.Refused, "symbolic link"):
+            self.quietly(installer.preflight, self.bjorn, "narrow")
+        self.assertFalse(os.path.exists(installer.STATE_DIR))
+
+    def test_a_failed_write_removes_only_its_own_temporary_file(self):
+        not_ours = self.display + ".pisugar-tmp"
+        InstallTest.write(not_ours, "someone else's file\n")
+        with mock.patch.object(installer.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                installer.write_file(self.display, "new content")
+        with open(not_ours, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "someone else's file\n")
+        leftovers = [n for n in os.listdir(self.bjorn)
+                     if n.endswith(".pisugar-tmp") and n != os.path.basename(not_ours)]
+        self.assertEqual(leftovers, [])
+        with open(self.display, encoding="utf-8") as f:
+            self.assertEqual(f.read(), STOCK_DISPLAY)
+
+    def test_mode_is_applied_to_a_new_file(self):
+        target = os.path.join(self.bjorn, "new-file")
+        installer.write_file(target, "x", mode=0o640)
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o640)
+
+
 if __name__ == "__main__":
     unittest.main()

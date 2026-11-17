@@ -15,7 +15,9 @@ is forced to.
 
 Files are rewritten by writing a temporary copy and renaming it over the
 original, with the original's owner, group and mode, so nothing about a file
-changes except its content.
+changes except its content. This runs as root inside Bjorn's directory, which
+the unprivileged bjorn user can write to, so no name in that directory is
+trusted: see write_file().
 
 Run by the shell scripts as root; not meant to be imported by Bjorn.
 """
@@ -28,6 +30,7 @@ import glob
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import stat
 import sys
@@ -140,33 +143,104 @@ def read_text(path):
 
 
 def write_file(path, text, mode=None, owner=None):
-    """Write `text` to `path` atomically.
+    """Write `text` to `path` atomically, without following symbolic links.
+
+    install.sh runs this as root, and Bjorn's directory belongs to the
+    unprivileged bjorn user, who could have prepared any name in it - for
+    example a symbolic link to /etc/shadow where a temporary file is expected.
+    So nothing here goes through a name that someone else controls:
+
+    - the directory is opened once, refusing a symbolic link, and every step
+      below works relative to that handle;
+    - a destination that is a symbolic link, or not a regular file, is refused;
+    - the temporary file gets an unpredictable name and is created with
+      O_CREAT | O_EXCL | O_NOFOLLOW, so anything already at that name makes
+      the creation fail instead of being written through;
+    - mode and owner are set on the open descriptor, and the data is fsynced,
+      before the file is renamed over the destination;
+    - on failure, only the temporary file this call created is removed.
 
     `mode` and `owner` ((uid, gid)) default to those of the file being replaced,
     so rewriting display.py or the config changes nothing but the content. A new
     file defaults to 0644, owned by whoever runs this.
     """
-    if os.path.exists(path):
-        st = os.stat(path)
-        mode = stat.S_IMODE(st.st_mode) if mode is None else mode
-        owner = (st.st_uid, st.st_gid) if owner is None else owner
-    mode = 0o644 if mode is None else mode
-    tmp = f"{path}.pisugar-tmp"
+    directory, name = os.path.split(os.path.abspath(path))
     try:
-        with open(tmp, "wb") as f:
-            f.write(text.encode("utf-8"))
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        if owner is not None:
-            current = os.stat(tmp)
-            if (current.st_uid, current.st_gid) != owner:
-                os.chown(tmp, *owner)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        if os.path.islink(directory):
+            raise Refused(f"{directory} is a symbolic link - refusing to write into it") from e
         raise
+    try:
+        try:
+            current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        if current is not None:
+            if stat.S_ISLNK(current.st_mode):
+                raise Refused(f"{path} is a symbolic link - refusing to replace it")
+            if not stat.S_ISREG(current.st_mode):
+                raise Refused(f"{path} is not a regular file - refusing to replace it")
+            mode = stat.S_IMODE(current.st_mode) if mode is None else mode
+            owner = (current.st_uid, current.st_gid) if owner is None else owner
+        mode = 0o644 if mode is None else mode
+
+        tmp, fd = _create_temporary(dir_fd, name)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(text.encode("utf-8"))
+                f.flush()
+                os.fchmod(f.fileno(), mode)
+                if owner is not None:
+                    st = os.fstat(f.fileno())
+                    if (st.st_uid, st.st_gid) != owner:
+                        os.fchown(f.fileno(), *owner)
+                os.fsync(f.fileno())
+            os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp, dir_fd=dir_fd)
+            raise
+        os.fsync(dir_fd)                # make the rename itself durable
+    finally:
+        os.close(dir_fd)
+
+
+def _create_temporary(dir_fd, name):
+    """A new, empty file next to `name`, created by this call and nobody else.
+
+    O_EXCL fails on any existing entry, a symbolic link included, and
+    O_NOFOLLOW makes sure a link is never followed. Mode 0600 until the content
+    is complete.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for _ in range(100):
+        tmp = f".{name}.{secrets.token_hex(8)}.pisugar-tmp"
+        try:
+            return tmp, os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            continue
+    raise Refused(f"could not create a temporary file next to {name}")
+
+
+def regular_file_or_absent(path):
+    """Refuse a path that is a symbolic link or anything but a regular file."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        raise Refused(f"{path} is a symbolic link - point BJORN_DIR at the real files")
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused(f"{path} is not a regular file")
+
+
+def real_directory(path):
+    """Refuse a directory that is a symbolic link, or missing."""
+    if os.path.islink(path.rstrip("/") or "/"):
+        raise Refused(f"{path} is a symbolic link - point BJORN_DIR at the real directory")
+    if not os.path.isdir(path):
+        raise Refused(f"{path} is not a directory")
 
 
 def read_config(path):
@@ -275,6 +349,13 @@ def preflight(bjorn_dir, layout):
     if record and record["bjorn_dir"] != bjorn_dir:
         raise Refused(f"already installed into {record['bjorn_dir']} - "
                       "run uninstall.sh first, or point BJORN_DIR there")
+    # write_file() refuses links; finding one here stops the install before
+    # anything has changed rather than halfway through.
+    real_directory(bjorn_dir)
+    real_directory(os.path.dirname(config_path(bjorn_dir)))
+    for path in (display_path(bjorn_dir), config_path(bjorn_dir),
+                 os.path.join(bjorn_dir, "pisugar.py")):
+        regular_file_or_absent(path)
     read_config(config_path(bjorn_dir))
 
     text = read_text(display_path(bjorn_dir))
@@ -480,11 +561,16 @@ def uninstall(bjorn_dir, force=False):
         removed = [k for k in record["config"]["keys_added"] if k in config]
         for key in removed:
             del config[key]
-        if removed:
-            write_config(cfg_file, config)
-            say("ok", "config keys removed: " + ", ".join(k for k in removed if not k.startswith("__")))
-        else:
+        if not removed:
             say("skip", "no config keys to remove")
+        else:
+            try:
+                write_config(cfg_file, config)
+            except Refused as e:
+                say("warn", f"{e} - config keys left in place")
+                status = 1
+            else:
+                say("ok", "config keys removed: " + ", ".join(k for k in removed if not k.startswith("__")))
 
     report_leftovers(record)
     if status == 0:
@@ -501,17 +587,17 @@ def restore_display(display):
         say("skip", "display.py no longer contains the patch - left as it is")
         return 0
     original = original_path()
-    if (sha256_text(text) == display["patched_sha256"]
-            and sha256_file(original) == display["original_sha256"]):
-        write_file(path, read_text(original))
-        say("ok", "display.py restored to the original")
-        return 0
     try:
+        if (sha256_text(text) == display["patched_sha256"]
+                and sha256_file(original) == display["original_sha256"]):
+            write_file(path, read_text(original))
+            say("ok", "display.py restored to the original")
+            return 0
         stock, _ = unpatch_text(text)
+        write_file(path, stock)
     except Refused as e:
         say("warn", f"{e} - display.py left as it is; remove the PiSugar lines by hand")
         return 1
-    write_file(path, stock)
     if sha256_text(stock) == display["original_sha256"]:
         say("ok", "display.py restored to the original")
     else:

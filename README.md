@@ -159,7 +159,11 @@ with nothing installed. Then it:
 Every change is recorded in `/var/lib/bjorn-pisugar/install.json`: the keys it added, a
 SHA-256 of every file it wrote, the packages it installed and whether it enabled I2C. That
 record is what the uninstaller works from. Rewritten files keep their owner, group and
-mode. The installer is safe to re-run. After a Bjorn update that replaced `display.py`,
+mode. Bjorn's directory belongs to the unprivileged `bjorn` user, so the installer, running
+as root, never writes through a name there that someone else could have prepared. Each
+file goes to a new temporary file with an unpredictable name and is then renamed into
+place, and a symbolic link is refused rather than followed. The installer is safe to
+re-run. After a Bjorn update that replaced `display.py`,
 re-running it patches the new file and keeps the new original.
 
 **Upgrading from 0.2.0:** `git pull` and run `sudo ./install.sh` again. It takes out the

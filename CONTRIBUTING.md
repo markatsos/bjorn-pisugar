@@ -41,6 +41,10 @@ not up for negotiation:
 - Never fall back to default settings for anything that acts on the hardware.
 - Every change install makes to Bjorn's files goes through `lib/installer.py` and into
   the install record, so that uninstall can revert exactly that.
+- The installer runs as root in a directory the `bjorn` user can write to. Write files
+  only through `write_file()`, which never follows a symbolic link and creates its
+  temporary file with `O_EXCL`. Never open a path in Bjorn's directory for writing
+  directly.
 
 ## The display patch
 

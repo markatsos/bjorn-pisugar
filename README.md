@@ -14,6 +14,8 @@ change it makes, and the uninstaller reverts exactly those changes, byte for byt
 > A third-party community project. It is not affiliated with, maintained or supported by
 > PiSugar or by the Bjorn project.
 
+The PiSugar documentation has a page for this setup: [Bjorn](https://docs.pisugar.com/docs/product-wiki/bjorn/intro).
+
 ## What it adds
 
 **Battery indicator.** Percentage and a battery glyph in the top right of the header. The
